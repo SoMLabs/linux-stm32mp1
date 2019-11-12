@@ -1872,6 +1872,31 @@ static const struct panel_desc ortustech_com43h4m85ulc = {
 	.bus_flags = DRM_BUS_FLAG_DE_HIGH | DRM_BUS_FLAG_PIXDATA_POSEDGE,
 };
 
+static const struct drm_display_mode powertip_ph800480t013_ibc17_mode = {
+	.clock = 33300,
+	.hdisplay = 800,
+	.hsync_start = 800 + 210,
+	.hsync_end = 800 + 210 + 46,
+	.htotal = 800 + 210 + 46 + 46,
+	.vdisplay = 480,
+	.vsync_start = 480 + 22,
+	.vsync_end = 480 + 22 + 23,
+	.vtotal = 480 + 33 + 223 + 23,
+	.vrefresh = 60,
+};
+
+static const struct panel_desc powertip_ph800480t013_ibc17 = {
+	.modes = &powertip_ph800480t013_ibc17_mode,
+	.num_modes = 1,
+	.bpc = 6,
+	.size = {
+		.width = 154,
+		.height = 85,
+	},
+	.bus_format = MEDIA_BUS_FMT_RGB666_1X18,
+	.bus_flags = DRM_BUS_FLAG_DE_HIGH | DRM_BUS_FLAG_PIXDATA_NEGEDGE,
+};
+
 static const struct drm_display_mode qd43003c0_40_mode = {
 	.clock = 9000,
 	.hdisplay = 480,
@@ -2504,6 +2529,9 @@ static const struct of_device_id platform_of_match[] = {
 	}, {
 		.compatible = "ortustech,com43h4m85ulc",
 		.data = &ortustech_com43h4m85ulc,
+	}, {
+		.compatible = "powertip,ph800480t013-ibc17",
+		.data = &powertip_ph800480t013_ibc17,
 	}, {
 		.compatible = "qiaodian,qd43003c0-40",
 		.data = &qd43003c0_40,
