@@ -171,8 +171,10 @@ static void dwc2_set_stm32mp1_fsotg_params(struct dwc2_hsotg *hsotg)
 static void dwc2_set_stm32mp1_hsotg_params(struct dwc2_hsotg *hsotg)
 {
 	struct dwc2_core_params *p = &hsotg->params;
+	struct device_node *np = hsotg->dev->of_node;
 
-	p->activate_stm_id_vb_detection = true;
+	p->otg_cap = DWC2_CAP_PARAM_NO_HNP_SRP_CAPABLE;
+	p->activate_stm_id_vb_detection = !of_property_read_bool(np, "extcon");
 	p->host_rx_fifo_size = 440;
 	p->host_nperio_tx_fifo_size = 256;
 	p->host_perio_tx_fifo_size = 256;
@@ -417,11 +419,6 @@ static void dwc2_get_device_properties(struct dwc2_hsotg *hsotg)
 
 	if (of_find_property(hsotg->dev->of_node, "disable-over-current", NULL))
 		p->oc_disable = true;
-
-	if (hsotg->dr_mode == USB_DR_MODE_PERIPHERAL)
-		p->force_b_session_valid =
-			of_property_read_bool(hsotg->dev->of_node,
-					      "force-b-session-valid");
 }
 
 static void dwc2_check_param_otg_cap(struct dwc2_hsotg *hsotg)

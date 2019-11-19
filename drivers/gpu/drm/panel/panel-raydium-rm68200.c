@@ -265,11 +265,6 @@ static int rm68200_unprepare(struct drm_panel *panel)
 
 	msleep(120);
 
-	if (ctx->reset_gpio) {
-		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		msleep(20);
-	}
-
 	regulator_disable(ctx->supply);
 
 	ctx->prepared = false;
@@ -383,7 +378,8 @@ static int rm68200_probe(struct mipi_dsi_device *dsi)
 	ctx->supply = devm_regulator_get(dev, "power");
 	if (IS_ERR(ctx->supply)) {
 		ret = PTR_ERR(ctx->supply);
-		dev_err(dev, "cannot get regulator: %d\n", ret);
+		if (ret != -EPROBE_DEFER)
+			dev_err(dev, "cannot get regulator: %d\n", ret);
 		return ret;
 	}
 

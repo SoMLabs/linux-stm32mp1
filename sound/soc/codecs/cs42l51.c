@@ -104,6 +104,7 @@ static const DECLARE_TLV_DB_SCALE(tone_tlv, -1050, 150, 0);
 static const DECLARE_TLV_DB_SCALE(aout_tlv, -10200, 50, 0);
 
 static const DECLARE_TLV_DB_SCALE(boost_tlv, 1600, 1600, 0);
+static const DECLARE_TLV_DB_SCALE(adc_boost_tlv, 2000, 2000, 0);
 static const char *chan_mix[] = {
 	"L R",
 	"L+R",
@@ -132,6 +133,8 @@ static const struct snd_kcontrol_new cs42l51_snd_controls[] = {
 	SOC_SINGLE("Zero Cross Switch", CS42L51_DAC_CTL, 0, 0, 0),
 	SOC_DOUBLE_TLV("Mic Boost Volume",
 			CS42L51_MIC_CTL, 0, 1, 1, 0, boost_tlv),
+	SOC_DOUBLE_TLV("ADC Boost Volume",
+			CS42L51_MIC_CTL, 5, 6, 1, 0, adc_boost_tlv),
 	SOC_SINGLE_TLV("Bass Volume", CS42L51_TONE_CTL, 0, 0xf, 1, tone_tlv),
 	SOC_SINGLE_TLV("Treble Volume", CS42L51_TONE_CTL, 4, 0xf, 1, tone_tlv),
 	SOC_ENUM_EXT("PCM channel mixer",
@@ -483,6 +486,13 @@ static int cs42l51_dai_mute(struct snd_soc_dai *dai, int mute)
 	return snd_soc_component_write(component, CS42L51_DAC_OUT_CTL, reg);
 }
 
+static int cs42l51_of_xlate_dai_id(struct snd_soc_component *component,
+				   struct device_node *endpoint)
+{
+	/* return dai id 0, whatever the endpoint index */
+	return 0;
+}
+
 static const struct snd_soc_dai_ops cs42l51_dai_ops = {
 	.hw_params      = cs42l51_hw_params,
 	.set_sysclk     = cs42l51_set_dai_sysclk,
@@ -490,29 +500,23 @@ static const struct snd_soc_dai_ops cs42l51_dai_ops = {
 	.digital_mute   = cs42l51_dai_mute,
 };
 
-static struct snd_soc_dai_driver cs42l51_dai[] = {
-	{
-		.name = "cs42l51-hifi0",
-		.playback = {
-			.stream_name = "Playback",
-			.channels_min = 1,
-			.channels_max = 2,
-			.rates = SNDRV_PCM_RATE_8000_96000,
-			.formats = CS42L51_FORMATS,
-		},
-		.ops = &cs42l51_dai_ops,
+static struct snd_soc_dai_driver cs42l51_dai = {
+	.name = "cs42l51-hifi",
+	.playback = {
+		.stream_name = "Playback",
+		.channels_min = 1,
+		.channels_max = 2,
+		.rates = SNDRV_PCM_RATE_8000_96000,
+		.formats = CS42L51_FORMATS,
 	},
-	{
-		.name = "cs42l51-hifi1",
-		.capture = {
-			.stream_name = "Capture",
-			.channels_min = 1,
-			.channels_max = 2,
-			.rates = SNDRV_PCM_RATE_8000_96000,
-			.formats = CS42L51_FORMATS,
-		},
-		.ops = &cs42l51_dai_ops,
-	}
+	.capture = {
+		.stream_name = "Capture",
+		.channels_min = 1,
+		.channels_max = 2,
+		.rates = SNDRV_PCM_RATE_8000_96000,
+		.formats = CS42L51_FORMATS,
+	},
+	.ops = &cs42l51_dai_ops,
 };
 
 static int cs42l51_component_probe(struct snd_soc_component *component)
@@ -551,6 +555,7 @@ static const struct snd_soc_component_driver soc_component_device_cs42l51 = {
 	.num_dapm_widgets	= ARRAY_SIZE(cs42l51_dapm_widgets),
 	.dapm_routes		= cs42l51_routes,
 	.num_dapm_routes	= ARRAY_SIZE(cs42l51_routes),
+	.of_xlate_dai_id	= cs42l51_of_xlate_dai_id,
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
@@ -731,7 +736,7 @@ int cs42l51_probe(struct device *dev, struct regmap *regmap)
 		 val & CS42L51_CHIP_REV_MASK);
 
 	ret = devm_snd_soc_register_component(dev,
-			&soc_component_device_cs42l51, cs42l51_dai, 2);
+			&soc_component_device_cs42l51, &cs42l51_dai, 1);
 	if (ret < 0)
 		goto error;
 

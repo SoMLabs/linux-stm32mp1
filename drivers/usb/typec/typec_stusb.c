@@ -7,7 +7,9 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/extcon-provider.h>
 #include <linux/i2c.h>
+#include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
@@ -134,18 +136,37 @@ enum stusb_pwr_mode {
 	DUAL_WITH_ACCESSORY_AND_TRY_SNK,
 };
 
+enum stusb_attached_mode {
+	NO_DEVICE_ATTACHED,
+	SINK_ATTACHED,
+	SOURCE_ATTACHED,
+	DEBUG_ACCESSORY_ATTACHED,
+	AUDIO_ACCESSORY_ATTACHED,
+};
+
 struct stusb {
 	struct device		*dev;
 	struct regmap		*regmap;
 	struct regulator	*vdd_supply;
 	struct regulator	*vsys_supply;
 	struct regulator	*vconn_supply;
+	struct regulator	*main_supply;
 
 	struct typec_port	*port;
 	struct typec_capability capability;
+	struct typec_partner	*partner;
 
 	enum typec_port_type	port_type;
 	enum typec_pwr_opmode	pwr_opmode;
+	bool			vbus_on;
+	struct extcon_dev	*edev;
+	struct work_struct	wq_detcable;
+};
+
+static const unsigned int stusb_extcon_cable[] = {
+	EXTCON_USB,
+	EXTCON_USB_HOST,
+	EXTCON_NONE,
 };
 
 static bool stusb_reg_writeable(struct device *dev, unsigned int reg)
@@ -168,7 +189,7 @@ static bool stusb_reg_writeable(struct device *dev, unsigned int reg)
 
 static bool stusb_reg_readable(struct device *dev, unsigned int reg)
 {
-	if ((reg >= 0x00 && reg <= 0x0A) ||
+	if (reg <= 0x0A ||
 	    (reg >= 0x14 && reg <= 0x17) ||
 	    (reg >= 0x19 && reg <= 0x1D) ||
 	    (reg >= 0x29 && reg <= 0x2D) ||
@@ -222,6 +243,54 @@ static const struct regmap_config stusb1600_regmap_config = {
 	.cache_type	= REGCACHE_RBTREE,
 };
 
+static void stusb_extcon_detect_cable(struct work_struct *work)
+{
+	struct stusb *chip = container_of(work, struct stusb, wq_detcable);
+	u32 conn_status, vbus_status;
+	bool id, vbus;
+	int ret;
+
+	/* Check ID and Vbus to update cable state */
+	ret = regmap_read(chip->regmap, STUSB_CC_CONNECTION_STATUS,
+			  &conn_status);
+	if (ret)
+		return;
+
+	ret = regmap_read(chip->regmap, STUSB_VBUS_ENABLE_STATUS,
+			  &vbus_status);
+	if (ret)
+		return;
+
+	/* 0 = Device, 1 = Host */
+	id = STUSB_CC_DATA_ROLE(conn_status);
+
+	if (STUSB_CC_POWER_ROLE(conn_status)) /* Source */
+		vbus = !!(vbus_status & STUSB_VBUS_SOURCE_EN);
+	else /* Sink */
+		vbus = !!(vbus_status & STUSB_VBUS_SINK_EN);
+
+	dev_dbg(chip->dev, "role=%s vbus=%sable\n",
+		id ? "Host" : "Device", vbus ? "en" : "dis");
+
+	/*
+	 * !vbus = detached, so neither B-Session Valid nor A-Session Valid
+	 * !vbus = !EXTCON_USB && !EXTCON_USB_HOST
+	 * vbus = attached, so either B-Session Valid or A-Session Valid
+	 * vbus && !id = B-Session Valid = EXTCON_USB && !EXTCON_USB_HOST
+	 * vbus && id = A-Session Valid = !EXTCON_USB && EXTCON_USB_HOST
+	 */
+
+	if (!vbus || !id) /* Detached or B-Session */
+		extcon_set_state_sync(chip->edev, EXTCON_USB_HOST, false);
+	if (!vbus || id) /* Detached or A-Session */
+		extcon_set_state_sync(chip->edev, EXTCON_USB, false);
+
+	if (vbus && id) /* Attached and A-Session Valid */
+		extcon_set_state_sync(chip->edev, EXTCON_USB_HOST, true);
+	if (vbus && !id) /* Attached and B-Session Valid */
+		extcon_set_state_sync(chip->edev, EXTCON_USB, true);
+}
+
 static bool stusb_get_vconn(struct stusb *chip)
 {
 	u32 val;
@@ -233,7 +302,7 @@ static bool stusb_get_vconn(struct stusb *chip)
 		return false;
 	}
 
-	return !!FIELD_GET(STUSB_CC_VCONN_SUPPLY_EN, val);;
+	return !!FIELD_GET(STUSB_CC_VCONN_SUPPLY_EN, val);
 }
 
 static int stusb_set_vconn(struct stusb *chip, bool on)
@@ -285,8 +354,167 @@ static enum typec_pwr_opmode stusb_get_pwr_opmode(struct stusb *chip)
 	return FIELD_GET(STUSB_CC_CURRENT_ADVERTISED, val);
 }
 
+static enum typec_accessory stusb_get_accessory(u32 status)
+{
+	enum stusb_attached_mode mode;
+
+	mode = FIELD_GET(STUSB_CC_ATTACHED_MODE, status);
+
+	switch (mode) {
+	case DEBUG_ACCESSORY_ATTACHED:
+		return TYPEC_ACCESSORY_DEBUG;
+	case AUDIO_ACCESSORY_ATTACHED:
+		return TYPEC_ACCESSORY_AUDIO;
+	default:
+		return TYPEC_ACCESSORY_NONE;
+	}
+}
+
+static enum typec_role stusb_get_vconn_role(u32 status)
+{
+	if (FIELD_GET(STUSB_CC_VCONN_SUPPLY, status))
+		return TYPEC_SOURCE;
+	else
+		return TYPEC_SINK;
+}
+
+static int stusb_attach(struct stusb *chip, u32 status)
+{
+	struct typec_partner_desc desc;
+	int ret;
+
+	if ((STUSB_CC_POWER_ROLE(status) == TYPEC_SOURCE) &&
+	    chip->vdd_supply) {
+		ret = regulator_enable(chip->vdd_supply);
+		if (ret) {
+			dev_err(chip->dev,
+				"Failed to enable Vbus supply: %d\n", ret);
+			return ret;
+		}
+		chip->vbus_on = true;
+	}
+
+	desc.usb_pd = false;
+	desc.accessory = stusb_get_accessory(status);
+	desc.identity = NULL;
+
+	chip->partner = typec_register_partner(chip->port, &desc);
+	if (IS_ERR(chip->partner)) {
+		ret = PTR_ERR(chip->partner);
+		goto vbus_disable;
+	}
+
+	typec_set_pwr_role(chip->port, STUSB_CC_POWER_ROLE(status));
+	typec_set_pwr_opmode(chip->port, stusb_get_pwr_opmode(chip));
+	typec_set_vconn_role(chip->port, stusb_get_vconn_role(status));
+	typec_set_data_role(chip->port, STUSB_CC_DATA_ROLE(status));
+
+	queue_work(system_power_efficient_wq, &chip->wq_detcable);
+
+	return 0;
+
+vbus_disable:
+	if (chip->vbus_on) {
+		regulator_disable(chip->vdd_supply);
+		chip->vbus_on = false;
+	}
+
+	return ret;
+}
+
+static void stusb_detach(struct stusb *chip, u32 status)
+{
+	typec_unregister_partner(chip->partner);
+	chip->partner = NULL;
+
+	queue_work(system_power_efficient_wq, &chip->wq_detcable);
+
+	typec_set_pwr_role(chip->port, STUSB_CC_POWER_ROLE(status));
+	typec_set_pwr_opmode(chip->port, TYPEC_PWR_MODE_USB);
+	typec_set_vconn_role(chip->port, stusb_get_vconn_role(status));
+	typec_set_data_role(chip->port, STUSB_CC_DATA_ROLE(status));
+
+	if (chip->vbus_on) {
+		regulator_disable(chip->vdd_supply);
+		chip->vbus_on = false;
+	}
+}
+
+static irqreturn_t stusb_irq_handler(int irq, void *data)
+{
+	struct stusb *chip = data;
+	u32 pending, trans, status;
+	int ret;
+
+	ret = regmap_read(chip->regmap, STUSB_ALERT_STATUS, &pending);
+	if (ret)
+		return IRQ_NONE;
+
+	if (pending & STUSB_CC_CONNECTION) {
+		ret = regmap_read(chip->regmap,
+				  STUSB_CC_CONNECTION_STATUS_TRANS, &trans);
+		if (ret)
+			goto err;
+		ret = regmap_read(chip->regmap, STUSB_CC_CONNECTION_STATUS,
+				  &status);
+		if (ret)
+			goto err;
+
+		if (trans & STUSB_CC_ATTACH_TRANS) {
+			if (status & STUSB_CC_ATTACH) {
+				ret = stusb_attach(chip, status);
+				if (ret)
+					goto err;
+			} else {
+				stusb_detach(chip, status);
+			}
+		}
+	}
+err:
+	return IRQ_HANDLED;
+}
+
+static int stusb_irq_init(struct stusb *chip, int irq)
+{
+	u32 status;
+	int ret;
+
+	ret = regmap_read(chip->regmap, STUSB_CC_CONNECTION_STATUS, &status);
+	if (ret)
+		return ret;
+
+	if (status & STUSB_CC_ATTACH) {
+		ret = stusb_attach(chip, status);
+		if (ret)
+			dev_err(chip->dev, "attach failed: %d\n", ret);
+	}
+
+	ret = devm_request_threaded_irq(chip->dev, irq, NULL, stusb_irq_handler,
+					IRQF_ONESHOT, dev_name(chip->dev),
+					chip);
+	if (ret)
+		goto partner_unregister;
+
+	/* Unmask CC_CONNECTION events */
+	ret = regmap_write_bits(chip->regmap, STUSB_ALERT_STATUS_MASK_CTRL,
+				STUSB_CC_CONNECTION, 0);
+	if (ret)
+		goto partner_unregister;
+
+	return 0;
+
+partner_unregister:
+	if (chip->partner) {
+		typec_unregister_partner(chip->partner);
+		chip->partner = NULL;
+	}
+
+	return ret;
+}
+
 static int stusb_init(struct stusb *chip)
 {
+	u32 val;
 	int ret;
 
 	/* Change the default Type-C power mode */
@@ -309,7 +537,7 @@ static int stusb_init(struct stusb *chip)
 		return ret;
 
 	if (chip->port_type == TYPEC_PORT_SNK)
-		return 0;
+		goto skip_src;
 
 	/* Change the default Type-C Source power operation mode capability */
 	ret = regmap_update_bits(chip->regmap, STUSB_CC_CAPABILITY_CTRL,
@@ -326,11 +554,20 @@ static int stusb_init(struct stusb *chip)
 			return ret;
 	}
 
+skip_src:
 	/* Mask all events interrupts - to be unmasked with interrupt support */
 	ret = regmap_update_bits(chip->regmap, STUSB_ALERT_STATUS_MASK_CTRL,
 				 STUSB_ALL_ALERTS, STUSB_ALL_ALERTS);
+	if (ret)
+		return ret;
 
-	return ret;
+	/* Read status at least once to clear any stale interrupts */
+	regmap_read(chip->regmap, STUSB_ALERT_STATUS, &val);
+	regmap_read(chip->regmap, STUSB_CC_CONNECTION_STATUS_TRANS, &val);
+	regmap_read(chip->regmap, STUSB_MONITORING_STATUS_TRANS, &val);
+	regmap_read(chip->regmap, STUSB_HW_FAULT_STATUS_TRANS, &val);
+
+	return 0;
 }
 
 static int stusb_fw_get_caps(struct stusb *chip)
@@ -468,54 +705,61 @@ static int stusb_probe(struct i2c_client *client,
 
 	chip->dev = &client->dev;
 
+	chip->vsys_supply = devm_regulator_get_optional(chip->dev, "vsys");
+	if (IS_ERR(chip->vsys_supply)) {
+		ret = PTR_ERR(chip->vsys_supply);
+		if (ret != -ENODEV)
+			return ret;
+		chip->vsys_supply = NULL;
+	}
+
 	chip->vdd_supply = devm_regulator_get_optional(chip->dev, "vdd");
 	if (IS_ERR(chip->vdd_supply)) {
 		ret = PTR_ERR(chip->vdd_supply);
 		if (ret != -ENODEV)
 			return ret;
 		chip->vdd_supply = NULL;
-	} else {
-		ret = regulator_enable(chip->vdd_supply);
-		if (ret) {
-			dev_err(chip->dev,
-				"Failed to enable vdd supply: %d\n", ret);
-			return ret;
-		}
-	}
-
-	chip->vsys_supply = devm_regulator_get_optional(chip->dev, "vsys");
-	if (IS_ERR(chip->vsys_supply)) {
-		ret = PTR_ERR(chip->vsys_supply);
-		if (ret != -ENODEV)
-			goto vdd_reg_disable;
-		chip->vsys_supply = NULL;
-	} else {
-		ret = regulator_enable(chip->vsys_supply);
-		if (ret) {
-			dev_err(chip->dev,
-				"Failed to enable vsys supply: %d\n", ret);
-			goto vdd_reg_disable;
-		}
 	}
 
 	chip->vconn_supply = devm_regulator_get_optional(chip->dev, "vconn");
 	if (IS_ERR(chip->vconn_supply)) {
 		ret = PTR_ERR(chip->vconn_supply);
 		if (ret != -ENODEV)
-			goto vsys_reg_disable;
+			return ret;
 		chip->vconn_supply = NULL;
+	}
+
+	/*
+	 * When both VDD and VSYS power supplies are present, the low power
+	 * supply VSYS is selected when VSYS voltage is above 3.1 V.
+	 * Otherwise VDD is selected.
+	 */
+	if (chip->vdd_supply &&
+	    (!chip->vsys_supply ||
+	     (regulator_get_voltage(chip->vsys_supply) <= 3100000)))
+		chip->main_supply = chip->vdd_supply;
+	else
+		chip->main_supply = chip->vsys_supply;
+
+	if (chip->main_supply) {
+		ret = regulator_enable(chip->main_supply);
+		if (ret) {
+			dev_err(chip->dev,
+				"Failed to enable main supply: %d\n", ret);
+			return ret;
+		}
 	}
 
 	ret = stusb_get_caps(chip, &try_role);
 	if (ret) {
-		dev_err(chip->dev, "failed to get port caps: %d\n", ret);
-		goto vsys_reg_disable;
+		dev_err(chip->dev, "Failed to get port caps: %d\n", ret);
+		goto main_reg_disable;
 	}
 
 	ret = stusb_init(chip);
 	if (ret) {
-		dev_err(chip->dev, "failed to init port: %d\n", ret);
-		goto vsys_reg_disable;
+		dev_err(chip->dev, "Failed to init port: %d\n", ret);
+		goto main_reg_disable;
 	}
 
 	chip->port = typec_register_port(chip->dev, &chip->capability);
@@ -524,22 +768,66 @@ static int stusb_probe(struct i2c_client *client,
 		goto all_reg_disable;
 	}
 
-	/* To be moved in attach/detach procedure with interrupt support */
+	/*
+	 * Default power operation mode initialization: will be updated upon
+	 * attach/detach interrupt
+	 */
 	typec_set_pwr_opmode(chip->port, chip->pwr_opmode);
 
-	dev_info(chip->dev, "STUSB driver registered\n");
+	if (!client->irq) {
+		/*
+		 * If Source or Dual power role, need to enable VDD supply
+		 * providing Vbus if present. In case of interrupt support,
+		 * VDD supply will be dynamically managed upon attach/detach
+		 * interrupt.
+		 */
+		if ((chip->port_type != TYPEC_PORT_SNK) && chip->vdd_supply) {
+			ret = regulator_enable(chip->vdd_supply);
+			if (ret) {
+				dev_err(chip->dev,
+					"Failed to enable VDD supply: %d\n",
+					ret);
+				goto port_unregister;
+			}
+			chip->vbus_on = true;
+		}
+
+		return 0;
+	}
+
+	chip->edev = devm_extcon_dev_allocate(chip->dev, stusb_extcon_cable);
+	if (IS_ERR(chip->edev)) {
+		ret = PTR_ERR(chip->edev);
+		dev_err(chip->dev,
+			"Failed to allocate extcon device: %d\n", ret);
+		goto port_unregister;
+	}
+
+	ret = devm_extcon_dev_register(chip->dev, chip->edev);
+	if (ret) {
+		dev_err(chip->dev,
+			"Failed to register extcon device: %d\n", ret);
+		goto port_unregister;
+	}
+
+	INIT_WORK(&chip->wq_detcable, stusb_extcon_detect_cable);
+
+	ret = stusb_irq_init(chip, client->irq);
+	if (ret)
+		goto cancel_work_sync;
 
 	return 0;
 
+cancel_work_sync:
+	cancel_work_sync(&chip->wq_detcable);
+port_unregister:
+	typec_unregister_port(chip->port);
 all_reg_disable:
 	if (stusb_get_vconn(chip))
 		stusb_set_vconn(chip, false);
-vsys_reg_disable:
-	if (chip->vsys_supply)
-		regulator_disable(chip->vsys_supply);
-vdd_reg_disable:
-	if (chip->vdd_supply)
-		regulator_disable(chip->vdd_supply);
+main_reg_disable:
+	if (chip->main_supply)
+		regulator_disable(chip->main_supply);
 
 	return ret;
 }
@@ -548,30 +836,71 @@ static int stusb_remove(struct i2c_client *client)
 {
 	struct stusb *chip = i2c_get_clientdata(client);
 
-	typec_unregister_port(chip->port);
+	if (chip->partner) {
+		typec_unregister_partner(chip->partner);
+		chip->partner = NULL;
+	}
 
-  	if (stusb_get_vconn(chip))
-		stusb_set_vconn(chip, false);
-
-	if (chip->vdd_supply)
+	if (chip->vbus_on)
 		regulator_disable(chip->vdd_supply);
 
-	if (chip->vsys_supply)
-		regulator_disable(chip->vsys_supply);
+	if (chip->edev)
+		cancel_work_sync(&chip->wq_detcable);
+
+	typec_unregister_port(chip->port);
+
+	if (stusb_get_vconn(chip))
+		stusb_set_vconn(chip, false);
+
+	if (chip->main_supply)
+		regulator_disable(chip->main_supply);
 
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
-static int stusb_resume(struct device *dev)
+static int __maybe_unused stusb_suspend(struct device *dev)
 {
 	struct stusb *chip = dev_get_drvdata(dev);
 
-	return stusb_init(chip);
+	/* Mask interrupts */
+	return regmap_update_bits(chip->regmap, STUSB_ALERT_STATUS_MASK_CTRL,
+				  STUSB_ALL_ALERTS, STUSB_ALL_ALERTS);
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(stusb_pm_ops, NULL, stusb_resume);
+static int __maybe_unused stusb_resume(struct device *dev)
+{
+	struct stusb *chip = dev_get_drvdata(dev);
+	u32 status;
+	int ret;
+
+	ret = regcache_sync(chip->regmap);
+	if (ret)
+		return ret;
+
+	/* Unmask CC_CONNECTION events - chip->edev implies IRQ support */
+	if (chip->edev)
+		return regmap_write_bits(chip->regmap,
+					 STUSB_ALERT_STATUS_MASK_CTRL,
+					 STUSB_CC_CONNECTION, 0);
+
+	/* Check if attach/detach occurred during low power */
+	ret = regmap_read(chip->regmap, STUSB_CC_CONNECTION_STATUS, &status);
+	if (ret)
+		return ret;
+
+	if (chip->partner && !(status & STUSB_CC_ATTACH))
+		stusb_detach(chip, status);
+
+	if (!chip->partner && (status & STUSB_CC_ATTACH)) {
+		ret = stusb_attach(chip, status);
+		if (ret)
+			dev_err(chip->dev, "attach failed: %d\n", ret);
+	}
+
+	return ret;
+}
+
+static SIMPLE_DEV_PM_OPS(stusb_pm_ops, stusb_suspend, stusb_resume);
 
 static struct i2c_driver stusb_driver = {
 	.driver = {

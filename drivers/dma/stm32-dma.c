@@ -516,13 +516,19 @@ static int stm32_dma_terminate_all(struct dma_chan *c)
 	unsigned long flags;
 	LIST_HEAD(head);
 
-	spin_lock_irqsave(&chan->vchan.lock, flags);
 
-	if (chan->use_mdma)
+	if (chan->use_mdma) {
+		spin_lock_irqsave_nested(&chan->vchan.lock, flags,
+					 SINGLE_DEPTH_NESTING);
 		dmaengine_terminate_async(mchan->chan);
+	} else {
+		spin_lock_irqsave(&chan->vchan.lock, flags);
+	}
 
-	if (chan->busy) {
-		stm32_dma_stop(chan);
+	if (chan->desc) {
+		vchan_terminate_vdesc(&chan->desc->vdesc);
+		if (chan->busy)
+			stm32_dma_stop(chan);
 		chan->desc = NULL;
 	}
 
@@ -755,7 +761,7 @@ static int stm32_dma_mdma_flush_remaining(struct stm32_dma_chan *chan)
 				dev_err(chan2dev(chan),
 					"%s timeout waiting for last bytes\n",
 					__func__);
-				break;
+				return -EBUSY;
 			}
 			cpu_relax();
 			residue = stm32_dma_get_remaining_bytes(chan);
@@ -804,7 +810,6 @@ static void stm32_mdma_chan_complete(void *param,
 		}
 
 		if (chan->next_sg == chan->desc->num_sgs) {
-			list_del(&chan->desc->vdesc.node);
 			vchan_cookie_complete(&chan->desc->vdesc);
 			chan->desc = NULL;
 		}
@@ -893,6 +898,8 @@ static void stm32_dma_start_transfer(struct stm32_dma_chan *chan)
 		vdesc = vchan_next_desc(&chan->vchan);
 		if (!vdesc)
 			return;
+
+		list_del(&vdesc->node);
 
 		chan->desc = to_stm32_dma_desc(vdesc);
 		chan->next_sg = 0;
@@ -996,7 +1003,6 @@ static void stm32_dma_handle_chan_done(struct stm32_dma_chan *chan)
 		if (chan->use_mdma && chan->mchan.dir != DMA_MEM_TO_DEV)
 			return;
 		if (chan->next_sg == chan->desc->num_sgs) {
-			list_del(&chan->desc->vdesc.node);
 			vchan_cookie_complete(&chan->desc->vdesc);
 			chan->desc = NULL;
 		}
@@ -1054,11 +1060,17 @@ static void stm32_dma_issue_pending(struct dma_chan *c)
 	struct stm32_dma_chan *chan = to_stm32_dma_chan(c);
 	unsigned long flags;
 
-	spin_lock_irqsave(&chan->vchan.lock, flags);
+	if (chan->use_mdma)
+		spin_lock_irqsave_nested(&chan->vchan.lock, flags,
+					 SINGLE_DEPTH_NESTING);
+	else
+		spin_lock_irqsave(&chan->vchan.lock, flags);
+
 	if (vchan_issue_pending(&chan->vchan) && !chan->desc && !chan->busy) {
 		dev_dbg(chan2dev(chan), "vchan %pK: issued\n", &chan->vchan);
 		stm32_dma_start_transfer(chan);
 	}
+
 	spin_unlock_irqrestore(&chan->vchan.lock, flags);
 }
 
@@ -1446,7 +1458,6 @@ static int stm32_dma_mdma_prep_dma_cyclic(struct stm32_dma_chan *chan,
 	struct stm32_dma_mdma *mchan = &chan->mchan;
 	struct stm32_dma_mdma_desc *m_desc = &desc->sg_req[0].m_desc;
 	struct dma_slave_config config;
-	dma_addr_t mem;
 	int ret;
 
 	chan->sram_size = ALIGN(period_len, STM32_DMA_SRAM_GRANULARITY);
@@ -1458,7 +1469,6 @@ static int stm32_dma_mdma_prep_dma_cyclic(struct stm32_dma_chan *chan,
 	desc->dma_buf_size = 2 * chan->sram_size;
 
 	memset(&config, 0, sizeof(config));
-	mem = buf_addr;
 
 	/* Configure MDMA channel */
 	if (chan->mchan.dir == DMA_MEM_TO_DEV)
@@ -2032,13 +2042,15 @@ static int stm32_dma_probe(struct platform_device *pdev)
 	for (i = 0; i < STM32_DMA_MAX_CHANNELS; i++) {
 		chan = &dmadev->chan[i];
 		chan->irq = platform_get_irq(pdev, i);
-		if (chan->irq < 0)  {
-			ret = chan->irq;
+		ret = platform_get_irq(pdev, i);
+		if (ret < 0)  {
 			if (ret != -EPROBE_DEFER)
 				dev_err(&pdev->dev,
 					"No irq resource for chan %d\n", i);
 			goto err_unregister;
 		}
+		chan->irq = ret;
+
 		ret = devm_request_irq(&pdev->dev, chan->irq,
 				       stm32_dma_chan_irq, 0,
 				       dev_name(chan2dev(chan)), chan);

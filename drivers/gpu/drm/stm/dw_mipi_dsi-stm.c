@@ -335,15 +335,17 @@ static int dw_mipi_dsi_stm_probe(struct platform_device *pdev)
 		return PTR_ERR(dsi->base);
 	}
 
-	dsi->vdd_supply = devm_regulator_get(dev, "phy-dsi");
+	dsi->vdd_supply = devm_regulator_get_optional(dev, "phy-dsi");
 	if (IS_ERR(dsi->vdd_supply)) {
-		DRM_ERROR("can't get power supply\n");
-		return PTR_ERR(dsi->vdd_supply);
+		ret = PTR_ERR(dsi->vdd_supply);
+		if (ret != -EPROBE_DEFER)
+			dev_err(dev, "failed to request regulator: %d\n", ret);
+		return ret;
 	}
 
 	ret = regulator_enable(dsi->vdd_supply);
 	if (ret) {
-		DRM_ERROR("can't enable power supply\n");
+		dev_err(dev, "failed to enable regulator: %d\n", ret);
 		return ret;
 	}
 
@@ -360,6 +362,28 @@ static int dw_mipi_dsi_stm_probe(struct platform_device *pdev)
 		goto err_clk_get;
 	}
 
+	pclk = devm_clk_get(dev, "pclk");
+	if (IS_ERR(pclk)) {
+		ret = PTR_ERR(pclk);
+		dev_err(dev, "Unable to get peripheral clock: %d\n", ret);
+		goto err_pclk_get;
+	}
+
+	ret = clk_prepare_enable(pclk);
+	if (ret) {
+		dev_err(dev, "%s: Failed to enable peripheral clk\n", __func__);
+		goto err_pclk_get;
+	}
+
+	dsi->hw_version = dsi_read(dsi, DSI_VERSION) & VERSION;
+	clk_disable_unprepare(pclk);
+
+	if (dsi->hw_version != HWVER_130 && dsi->hw_version != HWVER_131) {
+		ret = -ENODEV;
+		dev_err(dev, "bad dsi hardware version\n");
+		goto err_pclk_get;
+	}
+
 	dw_mipi_dsi_stm_plat_data.base = dsi->base;
 	dw_mipi_dsi_stm_plat_data.priv_data = dsi;
 
@@ -369,34 +393,12 @@ static int dw_mipi_dsi_stm_probe(struct platform_device *pdev)
 	if (IS_ERR(dsi->dsi)) {
 		ret = PTR_ERR(dsi->dsi);
 		DRM_ERROR("Failed to initialize mipi dsi host\n");
-		goto err_probe;
-	}
-
-	pclk = devm_clk_get(dev, "pclk");
-	if (IS_ERR(pclk)) {
-		ret = PTR_ERR(pclk);
-		dev_err(dev, "Unable to get peripheral clock: %d\n", ret);
-		goto err_probe;
-	}
-
-	ret = clk_prepare_enable(pclk);
-	if (ret) {
-		dev_err(dev, "%s: Failed to enable peripheral clk\n", __func__);
-		goto err_probe;
-	}
-
-	dsi->hw_version = dsi_read(dsi, DSI_VERSION) & VERSION;
-	clk_disable_unprepare(pclk);
-
-	if (dsi->hw_version != HWVER_130 && dsi->hw_version != HWVER_131) {
-		ret = -ENODEV;
-		dev_err(dev, "bad dsi hardware version\n");
-		goto err_probe;
+		goto err_pclk_get;
 	}
 
 	return 0;
 
-err_probe:
+err_pclk_get:
 	clk_disable_unprepare(dsi->pllref_clk);
 
 err_clk_get:

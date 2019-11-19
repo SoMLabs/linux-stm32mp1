@@ -32,7 +32,6 @@
 
 /* STM32F4 - Registers for each ADC instance */
 #define STM32F4_ADC_SR			0x00
-#define STM32F4_ADC_CR1			0x04
 #define STM32F4_ADC_CR2			0x08
 #define STM32F4_ADC_SMPR1		0x0C
 #define STM32F4_ADC_SMPR2		0x10
@@ -66,7 +65,6 @@
 #define STM32F4_SCAN			BIT(8)
 #define STM32F4_JEOCIE			BIT(7)
 #define STM32F4_AWDIE			BIT(6)
-#define STM32F4_EOCIE			BIT(5)
 #define STM32F4_AWDCH_SHIFT		0
 #define STM32F4_AWDCH_MASK		GENMASK(4, 0)
 
@@ -88,7 +86,6 @@
 
 /* STM32H7 - Registers for each ADC instance */
 #define STM32H7_ADC_ISR			0x00
-#define STM32H7_ADC_IER			0x04
 #define STM32H7_ADC_CR			0x08
 #define STM32H7_ADC_CFGR		0x0C
 #define STM32H7_ADC_SMPR1		0x14
@@ -132,7 +129,6 @@
 #define STM32H7_AWD1IE			STM32H7_AWD1
 #define STM32H7_JEOSIE			STM32H7_JEOS
 #define STM32H7_OVRIE			STM32H7_OVR
-#define STM32H7_EOCIE			STM32H7_EOC
 
 /* STM32H7_ADC_CR - bit fields */
 #define STM32H7_ADCAL			BIT(31)
@@ -2315,7 +2311,7 @@ static int stm32_adc_dma_start(struct iio_dev *indio_dev)
 	cookie = dmaengine_submit(desc);
 	ret = dma_submit_error(cookie);
 	if (ret) {
-		dmaengine_terminate_all(adc->dma_chan);
+		dmaengine_terminate_sync(adc->dma_chan);
 		return ret;
 	}
 
@@ -2405,7 +2401,7 @@ static void __stm32_adc_buffer_predisable(struct iio_dev *indio_dev)
 	stm32_adc_ovr_irq_disable(adc);
 
 	if (adc->dma_chan) {
-		dmaengine_terminate_all(adc->dma_chan);
+		dmaengine_terminate_sync(adc->dma_chan);
 		irq_work_sync(&adc->work);
 	}
 

@@ -429,8 +429,6 @@ enum dwc2_ep0_state {
  *			in DWORDS with possible values from from
  *			16-32768 (default: 256, 256, 256, 256, 768,
  *			768, 768, 768, 0, 0, 0, 0, 0, 0, 0).
- * @force_b_session_valid: force B-peripheral session instead of relying on
- *			VBUS sensing (only valid when dr_mode = "peripheral").
  * @change_speed_quirk: Change speed configuration to DWC2_SPEED_PARAM_FULL
  *                      while full&low speed device connect. And change speed
  *                      back to DWC2_SPEED_PARAM_HIGH while device is gone.
@@ -516,7 +514,6 @@ struct dwc2_core_params {
 	u32 g_rx_fifo_size;
 	u32 g_np_tx_fifo_size;
 	u32 g_tx_fifo_size[MAX_EPS_CHANNELS];
-	bool force_b_session_valid;
 
 	bool change_speed_quirk;
 };
@@ -865,6 +862,8 @@ struct dwc2_hregs_backup {
  *                      - USB_DR_MODE_PERIPHERAL
  *                      - USB_DR_MODE_HOST
  *                      - USB_DR_MODE_OTG
+ * @edev:		extcon handle
+ * @edev_nb:		extcon notifier
  * @hcd_enabled:	Host mode sub-driver initialization indicator.
  * @gadget_enabled:	Peripheral mode sub-driver initialization indicator.
  * @ll_hw_enabled:	Status of low-level hardware resources.
@@ -1013,6 +1012,7 @@ struct dwc2_hregs_backup {
  * @ctrl_out_desc_dma:	EP0 OUT data phase desc chain DMA address
  * @ctrl_out_desc:	EP0 OUT data phase desc chain pointer
  * @irq:		Interrupt request line number
+ * @wakeirq:		Wakeup interrupt request line number
  * @clk:		Pointer to otg clock
  * @reset:		Pointer to dwc2 reset controller
  * @reset_ecc:          Pointer to dwc2 optional reset controller in Stratix10.
@@ -1053,6 +1053,8 @@ struct dwc2_hsotg {
 	struct dwc2_core_params params;
 	enum usb_otg_state op_state;
 	enum usb_dr_mode dr_mode;
+	struct extcon_dev *edev;
+	struct notifier_block edev_nb;
 	unsigned int hcd_enabled:1;
 	unsigned int gadget_enabled:1;
 	unsigned int ll_hw_enabled:1;
@@ -1070,6 +1072,7 @@ struct dwc2_hsotg {
 	spinlock_t lock;
 	void *priv;
 	int     irq;
+	int	wakeirq;
 	struct clk *clk;
 	struct reset_control *reset;
 	struct reset_control *reset_ecc;
@@ -1367,6 +1370,8 @@ static inline int dwc2_is_device_mode(struct dwc2_hsotg *hsotg)
 	return (dwc2_readl(hsotg, GINTSTS) & GINTSTS_CURMODE_HOST) == 0;
 }
 
+int dwc2_drd_init(struct dwc2_hsotg *hsotg);
+
 /*
  * Dump core registers and SPRAM
  */
@@ -1383,6 +1388,7 @@ int dwc2_hsotg_resume(struct dwc2_hsotg *dwc2);
 int dwc2_gadget_init(struct dwc2_hsotg *hsotg);
 void dwc2_hsotg_core_init_disconnected(struct dwc2_hsotg *dwc2,
 				       bool reset);
+void dwc2_hsotg_core_disconnect(struct dwc2_hsotg *hsotg);
 void dwc2_hsotg_core_connect(struct dwc2_hsotg *hsotg);
 void dwc2_hsotg_disconnect(struct dwc2_hsotg *dwc2);
 int dwc2_hsotg_set_test_mode(struct dwc2_hsotg *hsotg, int testmode);
