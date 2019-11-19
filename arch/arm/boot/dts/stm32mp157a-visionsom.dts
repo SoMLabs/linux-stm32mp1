@@ -316,7 +316,7 @@
 };
 
 &rtc {
-	st,lsco = <RTC_OUT2_RMP>;
+	st,lsco = <RTC_OUT1>;
 	pinctrl-0 = <&rtc_out2_rmp_pins_a>;
 	pinctrl-names = "default";
 
@@ -379,13 +379,6 @@
 	status = "okay";
 };
 
-&rcc{
-	pinctrl-names = "default", "sleep";
-	pinctrl-0 = <&rcc_pins_mx>;
-	pinctrl-1 = <&rcc_sleep_pins_mx>;
-	status = "okay";
-};
-
 /* Wifi */
 &sdmmc3 {
 	arm,primecell-periphid = <0x10153180>;
@@ -421,8 +414,7 @@
 	status = "okay";
 
 	bluetooth {
-		pinctrl-names = "default";
-		pinctrl-0 = <&btreg>;
+		shutdown-gpios = <&gpioe 9 GPIO_ACTIVE_HIGH>;
 		compatible = "brcm,bcm43438-bt";
 		max-speed = <3000000>;
 	};
@@ -562,23 +554,6 @@
 					 <STM32_PINMUX('E', 15, ANALOG)>, /* LTDC_R7 */
 					 <STM32_PINMUX('F', 11, ANALOG)>, /* LTDC_G5 */
 					 <STM32_PINMUX('G', 8, ANALOG)>; /* LTDC_G7 */
-		};
-	};
-
-	rcc_pins_mx: rcc_mx-0 {
-		pins {
-			pinmux = <STM32_PINMUX('A', 13, AF2)>; /* RCC_MCO_1 */
-			bias-disable;
-			drive-push-pull;
-			slew-rate = <0>;
-		};
-	};
-
-	rcc_sleep_pins_mx: rcc_sleep_mx-0 {
-		u-boot,dm-pre-reloc;
-		pins {
-			u-boot,dm-pre-reloc;
-			pinmux = <STM32_PINMUX('A', 13, ANALOG)>; /* RCC_MCO_1 */
 		};
 	};
 
