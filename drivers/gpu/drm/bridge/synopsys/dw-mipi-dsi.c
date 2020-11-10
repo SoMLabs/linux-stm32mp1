@@ -236,6 +236,8 @@
 #define PHY_STATUS_TIMEOUT_US		10000
 #define CMD_PKT_STATUS_TIMEOUT_US	20000
 
+static bool first_pass = true;
+
 struct dw_mipi_dsi {
 	struct drm_bridge bridge;
 	struct mipi_dsi_host dsi_host;
@@ -961,31 +963,34 @@ static void dw_mipi_dsi_mode_set(struct dw_mipi_dsi *dsi,
 		DRM_DEBUG_DRIVER("Phy get_lane_mbps() failed\n");
 
 	pm_runtime_get_sync(dsi->dev);
-	dw_mipi_dsi_init(dsi);
-	dw_mipi_dsi_dpi_config(dsi, adjusted_mode);
-	dw_mipi_dsi_packet_handler_config(dsi);
-	dw_mipi_dsi_video_mode_config(dsi);
-	dw_mipi_dsi_video_packet_config(dsi, adjusted_mode);
-	dw_mipi_dsi_command_mode_config(dsi);
-	dw_mipi_dsi_line_timer_config(dsi, adjusted_mode);
-	dw_mipi_dsi_vertical_timing_config(dsi, adjusted_mode);
 
-	dw_mipi_dsi_dphy_init(dsi);
-	dw_mipi_dsi_dphy_timing_config(dsi);
-	dw_mipi_dsi_dphy_interface_config(dsi);
+	if (!first_pass) {
+		dw_mipi_dsi_init(dsi);
+		dw_mipi_dsi_dpi_config(dsi, adjusted_mode);
+		dw_mipi_dsi_packet_handler_config(dsi);
+		dw_mipi_dsi_video_mode_config(dsi);
+		dw_mipi_dsi_video_packet_config(dsi, adjusted_mode);
+		dw_mipi_dsi_command_mode_config(dsi);
+		dw_mipi_dsi_line_timer_config(dsi, adjusted_mode);
+		dw_mipi_dsi_vertical_timing_config(dsi, adjusted_mode);
 
-	dw_mipi_dsi_clear_err(dsi);
+		dw_mipi_dsi_dphy_init(dsi);
+		dw_mipi_dsi_dphy_timing_config(dsi);
+		dw_mipi_dsi_dphy_interface_config(dsi);
 
-	ret = phy_ops->init(priv_data);
-	if (ret)
-		DRM_DEBUG_DRIVER("Phy init() failed\n");
+		dw_mipi_dsi_clear_err(dsi);
 
-	dw_mipi_dsi_dphy_enable(dsi);
+		ret = phy_ops->init(priv_data);
+		if (ret)
+			DRM_DEBUG_DRIVER("Phy init() failed\n");
 
-	dw_mipi_dsi_wait_for_two_frames(adjusted_mode);
+		dw_mipi_dsi_dphy_enable(dsi);
 
-	/* Switch to cmd mode for panel-bridge pre_enable & panel prepare */
-	dw_mipi_dsi_set_mode(dsi, 0);
+		dw_mipi_dsi_wait_for_two_frames(adjusted_mode);
+
+		/* Switch to cmd mode for panel-bridge pre_enable & panel prepare */
+		dw_mipi_dsi_set_mode(dsi, 0);
+	}
 }
 
 static void dw_mipi_dsi_bridge_mode_set(struct drm_bridge *bridge,
@@ -1005,12 +1010,16 @@ static void dw_mipi_dsi_bridge_enable(struct drm_bridge *bridge)
 	const struct dw_mipi_dsi_phy_ops *phy_ops = dsi->plat_data->phy_ops;
 
 	/* Switch to video mode for panel-bridge enable & panel enable */
-	dw_mipi_dsi_set_mode(dsi, MIPI_DSI_MODE_VIDEO);
-	if (dsi->slave)
-		dw_mipi_dsi_set_mode(dsi->slave, MIPI_DSI_MODE_VIDEO);
+	if (!first_pass) {
+		dw_mipi_dsi_set_mode(dsi, MIPI_DSI_MODE_VIDEO);
+		if (dsi->slave)
+			dw_mipi_dsi_set_mode(dsi->slave, MIPI_DSI_MODE_VIDEO);
 
-	if (phy_ops->power_on)
-		phy_ops->power_on(dsi->plat_data->priv_data);
+		if (phy_ops->power_on)
+			phy_ops->power_on(dsi->plat_data->priv_data);
+	} else {
+		first_pass = false;
+	}
 }
 
 static enum drm_mode_status
@@ -1140,10 +1149,6 @@ __dw_mipi_dsi_probe(struct platform_device *pdev,
 			dev_err(dev, "%s: Failed to enable pclk\n", __func__);
 			return ERR_PTR(ret);
 		}
-
-		reset_control_assert(apb_rst);
-		usleep_range(10, 20);
-		reset_control_deassert(apb_rst);
 
 		clk_disable_unprepare(dsi->pclk);
 	}
