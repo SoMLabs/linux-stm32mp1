@@ -1271,12 +1271,6 @@ int ltdc_load(struct drm_device *ddev)
 
 	mutex_init(&ldev->err_lock);
 
-	if (!IS_ERR(rstc)) {
-		reset_control_assert(rstc);
-		usleep_range(10, 20);
-		reset_control_deassert(rstc);
-	}
-
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	ldev->regs = devm_ioremap_resource(dev, res);
 	if (IS_ERR(ldev->regs)) {
