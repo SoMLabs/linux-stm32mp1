@@ -1335,7 +1335,7 @@ int ltdc_load(struct drm_device *ddev)
 
 	clk_disable_unprepare(ldev->pixel_clk);
 
-	pinctrl_pm_select_sleep_state(ddev->dev);
+	pinctrl_pm_select_default_state(ddev->dev);
 
 	pm_runtime_enable(ddev->dev);
 
