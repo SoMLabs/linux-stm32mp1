@@ -624,6 +624,10 @@ static int panel_simple_probe(struct device *dev, const struct panel_desc *desc)
 	if (err)
 		goto free_ddc;
 
+	// Disable the backlight until the panel is enabled to avoid the image fading during
+	// initialization phase
+	backlight_disable(panel->base.backlight);
+
 	drm_panel_add(&panel->base);
 
 	dev_set_drvdata(dev, panel);
@@ -3138,6 +3142,30 @@ static const struct panel_desc pda_91_00156_a0  = {
 	.bus_format = MEDIA_BUS_FMT_RGB888_1X24,
 };
 
+static const struct drm_display_mode powertip_ph800480t013_ibc17_mode = {
+        .clock = 33300,
+        .hdisplay = 800,
+        .hsync_start = 800 + 210,
+        .hsync_end = 800 + 210 + 46,
+        .htotal = 800 + 210 + 46 + 46,
+        .vdisplay = 480,
+        .vsync_start = 480 + 22,
+        .vsync_end = 480 + 22 + 23,
+        .vtotal = 480 + 22 + 23 + 23,
+};
+
+static const struct panel_desc powertip_ph800480t013_ibc17 = {
+        .modes = &powertip_ph800480t013_ibc17_mode,
+        .num_modes = 1,
+        .bpc = 6,
+        .size = {
+                .width = 154,
+                .height = 85,
+        },
+        .bus_format = MEDIA_BUS_FMT_RGB666_1X18,
+        .bus_flags = DRM_BUS_FLAG_DE_HIGH | DRM_BUS_FLAG_PIXDATA_SAMPLE_NEGEDGE,
+};
+
 static const struct drm_display_mode powertip_ph800480t013_idf02_mode = {
 	.clock = 24750,
 	.hdisplay = 800,
@@ -4198,6 +4226,9 @@ static const struct of_device_id platform_of_match[] = {
 	}, {
 		.compatible = "pda,91-00156-a0",
 		.data = &pda_91_00156_a0,
+	}, {
+		.compatible = "powertip,ph800480t013-ibc17",
+		.data = &powertip_ph800480t013_ibc17,
 	}, {
 		.compatible = "powertip,ph800480t013-idf02",
 		.data = &powertip_ph800480t013_idf02,
