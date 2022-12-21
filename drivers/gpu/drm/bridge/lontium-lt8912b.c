@@ -44,10 +44,13 @@ struct lt8912 {
 	u8 data_lanes;
 	bool is_power_on;
 	bool is_attached;
+	bool swap_mipi_pn;
 };
 
 static int lt8912_write_init_config(struct lt8912 *lt)
 {
+	int ret;
+
 	const struct reg_sequence seq[] = {
 		/* Digital clock en*/
 		{0x08, 0xff},
@@ -75,15 +78,34 @@ static int lt8912_write_init_config(struct lt8912 *lt)
 		{0x55, 0x44},
 		{0x57, 0x01},
 		{0x5a, 0x02},
-
-		/*MIPI Analog*/
-		{0x3e, 0xd6},
-		{0x3f, 0xd4},
-		{0x41, 0x3c},
-		{0xB2, 0x00},
 	};
 
-	return regmap_multi_reg_write(lt->regmap[I2C_MAIN], seq, ARRAY_SIZE(seq));
+	ret = regmap_multi_reg_write(lt->regmap[I2C_MAIN], seq, ARRAY_SIZE(seq));
+	if (ret < 0)
+		return ret;
+
+	const struct reg_sequence seq_mipi_analog[] = {
+                {0x3e, 0xd6},
+                {0x3f, 0xd4},
+                {0x41, 0x3c},
+                {0xB2, 0x00},
+	};
+
+        const struct reg_sequence seq_mipi_analog_swapped[] = {
+                {0x3e, 0xf6}, /* Swap P/N mipi lines */
+                {0x3f, 0xd4},
+                {0x41, 0x3c},
+                {0xB2, 0x00},
+        };
+
+	if (lt->swap_mipi_pn)
+		return regmap_multi_reg_write(lt->regmap[I2C_MAIN],
+					      seq_mipi_analog_swapped,
+					      ARRAY_SIZE(seq_mipi_analog_swapped));
+	else
+		return regmap_multi_reg_write(lt->regmap[I2C_MAIN],
+					      seq_mipi_analog,
+					      ARRAY_SIZE(seq_mipi_analog));
 }
 
 static int lt8912_write_mipi_basic_config(struct lt8912 *lt)
@@ -646,6 +668,8 @@ static int lt8912_parse_dt(struct lt8912 *lt)
 	}
 	lt->data_lanes = data_lanes;
 
+	lt->swap_mipi_pn = of_property_read_bool(dev->of_node, "swap-mipi-pn");
+
 	lt->host_node = of_graph_get_remote_node(dev->of_node, 0, -1);
 	if (!lt->host_node) {
 		dev_err(lt->dev, "%s: Failed to get remote port\n", __func__);
@@ -662,7 +686,7 @@ static int lt8912_parse_dt(struct lt8912 *lt)
 	lt->hdmi_port = of_drm_find_bridge(port_node);
 	if (!lt->hdmi_port) {
 		dev_err(lt->dev, "%s: Failed to get hdmi port\n", __func__);
-		ret = -ENODEV;
+		ret = -EPROBE_DEFER;
 		goto err_free_host_node;
 	}
 
